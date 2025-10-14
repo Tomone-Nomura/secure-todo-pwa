@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/secure-todo-pwa/static/css/main.f855e6bc.css",
+    "main.js": "/secure-todo-pwa/static/js/main.e928886c.js",
+    "index.html": "/secure-todo-pwa/index.html",
+    "main.f855e6bc.css.map": "/secure-todo-pwa/static/css/main.f855e6bc.css.map",
+    "main.e928886c.js.map": "/secure-todo-pwa/static/js/main.e928886c.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.f855e6bc.css",
+    "static/js/main.e928886c.js"
+  ]
+}
