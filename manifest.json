@@ -1,6 +1,6 @@
 {
-  "short_name": "セキュアTODO",
-  "name": "セキュアTODO - プライバシー保護型タスク管理",
+  "short_name": "Secure TODO",
+  "name": "Secure TODO PWA - 位置情報連動TODOアプリ",
   "icons": [
     {
       "src": "favicon.ico",
@@ -10,17 +10,23 @@
     {
       "src": "logo192.png",
       "type": "image/png",
-      "sizes": "192x192"
+      "sizes": "192x192",
+      "purpose": "any maskable"
     },
     {
       "src": "logo512.png",
       "type": "image/png",
-      "sizes": "512x512"
+      "sizes": "512x512",
+      "purpose": "any maskable"
     }
   ],
   "start_url": ".",
   "display": "standalone",
-  "theme_color": "#000000",
-  "background_color": "#282c34",
-  "orientation": "portrait"
+  "theme_color": "#2196f3",
+  "background_color": "#ffffff",
+  "orientation": "portrait",
+  "scope": ".",
+  "description": "位置情報に基づいてプライバシーレベルを自動調整するセキュアなTODO管理アプリ",
+  "categories": ["productivity", "utilities"],
+  "lang": "ja"
 }
