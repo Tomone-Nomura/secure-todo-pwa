@@ -1,848 +1,629 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import './App.css';
 
+// 型定義
 interface Todo {
   id: number;
-  text: string;
-  description: string;
-  completed: boolean;
-  category: '学校' | '仕事' | '個人' | 'その他';
-  createdAt: Date;
+  title: string;
+  detail: string;
+  category: '個人' | '学校' | '仕事' | 'その他';
+  createdAt: string;
+  showDetail?: boolean;
 }
 
-interface SavedLocation {
+interface Location {
+  id: number;
+  name: string;
   latitude: number;
   longitude: number;
   radius: number;
-  context: LocationContext;
+  type: 'home' | 'school' | 'work';
 }
 
-interface GPSStatus {
-  isAvailable: boolean;
-  accuracy: number | null;
-  lastUpdate: Date | null;
-  error: string | null;
-  currentCoords: GeolocationCoordinates | null;
-}
+type LocationStatus = 'home' | 'school' | 'work' | 'outside';
+type PageType = 'main' | 'add-task' | 'locations' | 'account' | 'settings';
 
-type PrivacyLevel = 'minimal' | 'moderate' | 'full';
-type LocationContext = '外出先' | '学校' | '職場' | '自宅';
+// ヘルパー関数：Haversine式で距離計算
+const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+  const R = 6371000;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) *
+    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c;
+};
 
 function App() {
-  const [todos, setTodos] = useState<Todo[]>(() => {
-    const saved = localStorage.getItem('todos');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [input, setInput] = useState('');
-  const [description, setDescription] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<Todo['category']>('個人');
-  const [filterCategory, setFilterCategory] = useState<'すべて' | Todo['category']>('すべて');
+  const [currentPage, setCurrentPage] = useState<PageType>('main');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [inputTitle, setInputTitle] = useState('');
+  const [inputDetail, setInputDetail] = useState('');
+  const [category, setCategory] = useState<Todo['category']>('その他');
+  const [editingTodo, setEditingTodo] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDetail, setEditDetail] = useState('');
+  const [editCategory, setEditCategory] = useState<Todo['category']>('その他');
   
-  // プライバシー関連の状態
-  const [currentLocation, setCurrentLocation] = useState<LocationContext>('外出先');
-  const [isPersonalMode, setIsPersonalMode] = useState(false);
-  const [useAutoLocation, setUseAutoLocation] = useState(false);
-  const [showManualLocationSelect, setShowManualLocationSelect] = useState(false);
+  // 生体認証・プライベートモード関連
+  const [privateMode, setPrivateMode] = useState(false);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
+  const [authenticating, setAuthenticating] = useState(false);
   
-  // GPS関連の状態
-  const [gpsStatus, setGpsStatus] = useState<GPSStatus>({
-    isAvailable: false,
-    accuracy: null,
-    lastUpdate: null,
-    error: null,
-    currentCoords: null
-  });
-  const [savedLocations, setSavedLocations] = useState<SavedLocation[]>(() => {
-    const saved = localStorage.getItem('savedLocations');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [showLocationSaveDialog, setShowLocationSaveDialog] = useState(false);
-  const [locationToSave, setLocationToSave] = useState<LocationContext>('自宅');
-  const watchIdRef = useRef<number | null>(null);
-  
-  // セキュリティ関連
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [password, setPassword] = useState('');
-  const [hasSetPassword, setHasSetPassword] = useState(false);
-  const [showPasswordDialog, setShowPasswordDialog] = useState(false);
-  const [authAction, setAuthAction] = useState<'personal' | 'manual' | 'saveLocation' | ''>('');
-  
-  // 詳細表示の開閉を管理
-  const [expandedTodos, setExpandedTodos] = useState<Set<number>>(new Set());
-
-  // デバッグモード（テスト用）
+  // 位置情報関連
+  const [registeredLocations, setRegisteredLocations] = useState<Location[]>([]);
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lon: number } | null>(null);
+  const [locationStatus, setLocationStatus] = useState<LocationStatus>('outside');
+  const [newLocationName, setNewLocationName] = useState('');
+  const [newLocationType, setNewLocationType] = useState<Location['type']>('home');
+  const [newLocationRadius, setNewLocationRadius] = useState(150);
   const [debugMode, setDebugMode] = useState(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
 
+  // LocalStorage から読み込み
   useEffect(() => {
-    localStorage.setItem('todos', JSON.stringify(todos));
-  }, [todos]);
+    const savedTodos = localStorage.getItem('todos');
+    const savedBiometric = localStorage.getItem('biometricEnabled');
+    const savedLocations = localStorage.getItem('locations');
 
-  useEffect(() => {
-    const savedPassword = localStorage.getItem('appPassword');
-    if (savedPassword) {
-      setHasSetPassword(true);
+    if (savedTodos) setTodos(JSON.parse(savedTodos));
+    if (savedBiometric) setBiometricEnabled(JSON.parse(savedBiometric));
+    if (savedLocations) {
+      setRegisteredLocations(JSON.parse(savedLocations));
+    } else {
+      // デフォルトでJAISTを学校として追加
+      const jaist: Location = {
+        id: Date.now(),
+        name: 'JAIST（北陸先端科学技術大学院大学）',
+        latitude: 36.4507,
+        longitude: 136.5933,
+        radius: 200,
+        type: 'school'
+      };
+      setRegisteredLocations([jaist]);
+      localStorage.setItem('locations', JSON.stringify([jaist]));
     }
   }, []);
 
+  // データをLocalStorageに保存
   useEffect(() => {
-    localStorage.setItem('savedLocations', JSON.stringify(savedLocations));
-  }, [savedLocations]);
+    if (todos.length > 0) {
+      localStorage.setItem('todos', JSON.stringify(todos));
+    }
+  }, [todos]);
 
-  // Haversine式で2地点間の距離を計算（メートル）
-  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-    const R = 6371e3; // 地球の半径（メートル）
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lon2 - lon1) * Math.PI / 180;
+  useEffect(() => {
+    if (registeredLocations.length > 0) {
+      localStorage.setItem('locations', JSON.stringify(registeredLocations));
+    }
+  }, [registeredLocations]);
 
-    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ/2) * Math.sin(Δλ/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  useEffect(() => {
+    localStorage.setItem('biometricEnabled', JSON.stringify(biometricEnabled));
+  }, [biometricEnabled]);
 
-    return R * c;
-  };
+  // 生体認証の実行
+  const performBiometricAuth = async (action: string = 'authenticate'): Promise<boolean> => {
+    if (!('credentials' in navigator)) {
+      alert('このブラウザは生体認証に対応していません');
+      return false;
+    }
 
-  // 現在地から最も近い登録場所を判定
-  const detectLocationContext = (coords: GeolocationCoordinates): LocationContext => {
-    let detectedContext: LocationContext = '外出先';
-    let minDistance = Infinity;
-
-    savedLocations.forEach(location => {
-      const distance = calculateDistance(
-        coords.latitude,
-        coords.longitude,
-        location.latitude,
-        location.longitude
-      );
-
-      if (distance <= location.radius && distance < minDistance) {
-        minDistance = distance;
-        detectedContext = location.context;
+    setAuthenticating(true);
+    try {
+      // Web Authentication APIのシミュレーション
+      // 実際の実装では、適切なWebAuthn実装が必要
+      const result = window.confirm(`${action}のために生体認証を実行しますか？\n（これはシミュレーションです）`);
+      
+      if (result) {
+        // 実際の実装では、ここでWebAuthn APIを使用
+        console.log('生体認証成功');
+        return true;
       }
-    });
-
-    return detectedContext;
-  };
-
-  // GPS位置情報の処理
-  const handlePositionUpdate = (position: GeolocationPosition) => {
-    const coords = position.coords;
-    
-    setGpsStatus(prev => ({
-      ...prev,
-      isAvailable: true,
-      accuracy: coords.accuracy,
-      lastUpdate: new Date(),
-      error: null,
-      currentCoords: coords
-    }));
-
-    // 自動位置判定が有効な場合
-    if (useAutoLocation && !isPersonalMode) {
-      const detectedLocation = detectLocationContext(coords);
-      setCurrentLocation(detectedLocation);
+      return false;
+    } catch (error) {
+      console.error('生体認証エラー:', error);
+      return false;
+    } finally {
+      setAuthenticating(false);
     }
   };
 
-  const handlePositionError = (error: GeolocationPositionError) => {
-    let errorMessage = '';
-    switch(error.code) {
-      case error.PERMISSION_DENIED:
-        errorMessage = '位置情報の取得が許可されていません';
-        break;
-      case error.POSITION_UNAVAILABLE:
-        errorMessage = '位置情報が取得できません';
-        break;
-      case error.TIMEOUT:
-        errorMessage = '位置情報の取得がタイムアウトしました';
-        break;
-      default:
-        errorMessage = '位置情報の取得中にエラーが発生しました';
+  // 生体認証を有効化
+  const enableBiometric = async () => {
+    const success = await performBiometricAuth('生体認証を設定');
+    if (success) {
+      setBiometricEnabled(true);
+      alert('生体認証を有効化しました');
     }
-
-    setGpsStatus(prev => ({
-      ...prev,
-      isAvailable: false,
-      error: errorMessage,
-      lastUpdate: new Date()
-    }));
   };
 
-  // GPS監視の開始/停止
-  useEffect(() => {
-    if (useAutoLocation && 'geolocation' in navigator) {
-      // GPS監視開始
-      const options = {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0
-      };
-
-      // 初回の位置取得
-      navigator.geolocation.getCurrentPosition(
-        handlePositionUpdate,
-        handlePositionError,
-        options
-      );
-
-      // 継続的な監視
-      const watchId = navigator.geolocation.watchPosition(
-        handlePositionUpdate,
-        handlePositionError,
-        options
-      );
-
-      watchIdRef.current = watchId;
-
-      return () => {
-        if (watchIdRef.current !== null) {
-          navigator.geolocation.clearWatch(watchIdRef.current);
-          watchIdRef.current = null;
+  // プライベートモードの切り替え
+  const togglePrivateMode = async () => {
+    if (!privateMode) {
+      if (biometricEnabled) {
+        const success = await performBiometricAuth('プライベートモードを有効化');
+        if (success) {
+          setPrivateMode(true);
         }
-      };
-    } else if (!useAutoLocation && watchIdRef.current !== null) {
-      // GPS監視停止
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
-      setGpsStatus({
-        isAvailable: false,
-        accuracy: null,
-        lastUpdate: null,
-        error: null,
-        currentCoords: null
-      });
-    }
-  }, [useAutoLocation, savedLocations]); // savedLocationsも依存配列に追加
-
-  // 現在地を登録場所として保存
-  const saveCurrentLocation = () => {
-    if (gpsStatus.currentCoords) {
-      const newLocation: SavedLocation = {
-        latitude: gpsStatus.currentCoords.latitude,
-        longitude: gpsStatus.currentCoords.longitude,
-        radius: locationToSave === '自宅' ? 150 : 200, // 自宅は150m、その他は200m
-        context: locationToSave
-      };
-
-      // 既存の同じcontextの場所を更新
-      const updatedLocations = savedLocations.filter(loc => loc.context !== locationToSave);
-      setSavedLocations([...updatedLocations, newLocation]);
-      setShowLocationSaveDialog(false);
-      alert(`${locationToSave}として現在地を登録しました`);
-    }
-  };
-
-  // 認証処理
-  const authenticate = (action: 'personal' | 'manual' | 'saveLocation') => {
-    setAuthAction(action);
-    setShowPasswordDialog(true);
-  };
-
-  const authenticateWithPassword = () => {
-    const savedPassword = localStorage.getItem('appPassword');
-    
-    if (!savedPassword && password) {
-      localStorage.setItem('appPassword', password);
-      setHasSetPassword(true);
-      setIsAuthenticated(true);
-      executeAuthAction(authAction);
-      setShowPasswordDialog(false);
-      setPassword('');
-    } else if (savedPassword === password) {
-      setIsAuthenticated(true);
-      executeAuthAction(authAction);
-      setShowPasswordDialog(false);
-      setPassword('');
+      } else {
+        alert('先に生体認証を設定してください');
+        setCurrentPage('settings');
+      }
     } else {
-      alert('パスワードが間違っています');
+      setPrivateMode(false);
     }
   };
 
-  const executeAuthAction = (action: string) => {
-    if (action === 'personal') {
-      setIsPersonalMode(true);
-    } else if (action === 'manual') {
-      setShowManualLocationSelect(true);
-    } else if (action === 'saveLocation') {
-      setShowLocationSaveDialog(true);
-    }
-  };
-
-  const getPrivacyLevel = (): PrivacyLevel => {
-    if (isPersonalMode || currentLocation === '自宅') return 'full';
-    if (currentLocation === '学校' || currentLocation === '職場') return 'moderate';
-    return 'minimal';
-  };
-
-  // 詳細の表示切り替え
-  const toggleExpanded = (id: number) => {
-    const newExpanded = new Set(expandedTodos);
-    if (newExpanded.has(id)) {
-      newExpanded.delete(id);
-    } else {
-      newExpanded.add(id);
-    }
-    setExpandedTodos(newExpanded);
-  };
-
+  // TODO追加
   const addTodo = () => {
-    if (input.trim()) {
-      setTodos([...todos, {
+    if (inputTitle.trim()) {
+      const newTodo: Todo = {
         id: Date.now(),
-        text: input,
-        description: description,
-        completed: false,
-        category: selectedCategory,
-        createdAt: new Date()
-      }]);
-      setInput('');
-      setDescription('');
+        title: inputTitle,
+        detail: inputDetail,
+        category,
+        createdAt: new Date().toISOString(),
+        showDetail: false
+      };
+      setTodos([...todos, newTodo]);
+      setInputTitle('');
+      setInputDetail('');
+      alert('タスクを追加しました');
+      setCurrentPage('main');
     }
   };
 
-  const toggleTodo = (id: number) => {
-    setTodos(todos.map(todo =>
-      todo.id === id ? { ...todo, completed: !todo.completed } : todo
+  // TODO編集開始
+  const startEdit = (todo: Todo) => {
+    setEditingTodo(todo.id);
+    setEditTitle(todo.title);
+    setEditDetail(todo.detail);
+    setEditCategory(todo.category);
+  };
+
+  // TODO編集確定
+  const saveEdit = () => {
+    if (editTitle.trim() && editingTodo) {
+      setTodos(todos.map(todo => 
+        todo.id === editingTodo 
+          ? { ...todo, title: editTitle, detail: editDetail, category: editCategory }
+          : todo
+      ));
+      setEditingTodo(null);
+      setEditTitle('');
+      setEditDetail('');
+    }
+  };
+
+  // TODO削除
+  const deleteTodo = (id: number) => {
+    if (window.confirm('このタスクを削除しますか？')) {
+      setTodos(todos.filter(todo => todo.id !== id));
+    }
+  };
+
+  // 詳細表示切り替え
+  const toggleDetail = (id: number) => {
+    setTodos(todos.map(todo => 
+      todo.id === id ? { ...todo, showDetail: !todo.showDetail } : todo
     ));
   };
 
-  const deleteTodo = (id: number) => {
-    setTodos(todos.filter(todo => todo.id !== id));
-  };
+  // タスクが表示可能かチェック
+  const isTaskVisible = (todo: Todo): boolean => {
+    if (privateMode) return true;
 
-  const getCategoryColor = (category: Todo['category']) => {
-    switch(category) {
-      case '学校': return '#ff6b6b';
-      case '仕事': return '#4ecdc4';
-      case '個人': return '#45b7d1';
-      case 'その他': return '#96ceb4';
+    switch (locationStatus) {
+      case 'home':
+        return true;
+      case 'school':
+        return todo.category === '学校' || todo.category === 'その他';
+      case 'work':
+        return todo.category === '仕事' || todo.category === 'その他';
+      case 'outside':
+        return todo.category === 'その他';
+      default:
+        return todo.category === 'その他';
     }
   };
 
-  const filteredTodos = filterCategory === 'すべて' 
-    ? todos 
-    : todos.filter(todo => todo.category === filterCategory);
-
-  const getCategoryCounts = () => {
-    const counts = {
-      '学校': todos.filter(t => t.category === '学校').length,
-      '仕事': todos.filter(t => t.category === '仕事').length,
-      '個人': todos.filter(t => t.category === '個人').length,
-      'その他': todos.filter(t => t.category === 'その他').length,
+  // 非表示タスク数を計算
+  const getHiddenTasksCount = () => {
+    const counts: { [key: string]: number } = {
+      '個人': 0,
+      '学校': 0,
+      '仕事': 0,
+      'その他': 0
     };
+
+    todos.forEach(todo => {
+      if (!isTaskVisible(todo)) {
+        counts[todo.category]++;
+      }
+    });
+
     return counts;
   };
 
+  // 位置情報の更新処理
+  const handlePositionUpdate = useCallback((position: GeolocationPosition) => {
+    const { latitude, longitude, accuracy } = position.coords;
+    setCurrentLocation({ lat: latitude, lon: longitude });
+    setGpsAccuracy(accuracy);
+
+    let status: LocationStatus = 'outside';
+    for (const loc of registeredLocations) {
+      const distance = calculateDistance(latitude, longitude, loc.latitude, loc.longitude);
+      if (distance <= loc.radius) {
+        status = loc.type as LocationStatus;
+        break;
+      }
+    }
+    setLocationStatus(status);
+  }, [registeredLocations]);
+
+  // 位置情報の監視を開始
+  useEffect(() => {
+    if ('geolocation' in navigator) {
+      const watchId = navigator.geolocation.watchPosition(
+        handlePositionUpdate,
+        (error) => {
+          console.error('位置情報の取得に失敗:', error);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 30000
+        }
+      );
+
+      return () => navigator.geolocation.clearWatch(watchId);
+    }
+  }, [handlePositionUpdate]);
+
+  // 現在地を場所として登録（認証必要）
+  const registerCurrentLocation = async () => {
+    if (!currentLocation || !newLocationName) {
+      alert('場所の名前を入力してください');
+      return;
+    }
+
+    if (biometricEnabled) {
+      const success = await performBiometricAuth('場所を登録');
+      if (!success) return;
+    } else {
+      alert('先に生体認証を設定してください');
+      setCurrentPage('settings');
+      return;
+    }
+
+    const newLocation: Location = {
+      id: Date.now(),
+      name: newLocationName,
+      latitude: currentLocation.lat,
+      longitude: currentLocation.lon,
+      radius: newLocationRadius,
+      type: newLocationType
+    };
+    setRegisteredLocations([...registeredLocations, newLocation]);
+    setNewLocationName('');
+    setNewLocationRadius(150);
+    alert(`${newLocationName}を登録しました`);
+  };
+
+  // 場所を削除（認証必要）
+  const deleteLocation = async (id: number) => {
+    if (biometricEnabled) {
+      const success = await performBiometricAuth('場所を削除');
+      if (!success) return;
+    } else {
+      alert('先に生体認証を設定してください');
+      setCurrentPage('settings');
+      return;
+    }
+
+    setRegisteredLocations(registeredLocations.filter(loc => loc.id !== id));
+    alert('場所を削除しました');
+  };
+
+  // 位置ステータステキスト
+  const getLocationStatusText = () => {
+    switch (locationStatus) {
+      case 'home': return '自宅';
+      case 'school': return '学校';
+      case 'work': return '仕事場';
+      case 'outside': return '外出中';
+      default: return '外出中';
+    }
+  };
+
+  const hiddenCounts = getHiddenTasksCount();
+  const hasHiddenTasks = Object.values(hiddenCounts).some(count => count > 0);
+
   return (
     <div className="App">
-      <header className="App-header">
-        <h1>セキュアTODO</h1>
-        
-        {/* 位置情報コントロール */}
-        <div style={{ margin: '20px 0', padding: '10px', backgroundColor: '#2a2f37', borderRadius: '8px' }}>
-          <div style={{ marginBottom: '10px' }}>
-            <label style={{ marginRight: '20px' }}>
-              <input
-                type="checkbox"
-                checked={useAutoLocation}
-                onChange={(e) => setUseAutoLocation(e.target.checked)}
-                style={{ marginRight: '5px' }}
-              />
-              GPS自動取得
-            </label>
-            
-            <button
-              onClick={() => authenticate('manual')}
-              style={{
-                padding: '5px 10px',
-                marginRight: '10px',
-                backgroundColor: '#96ceb4',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-            >
-              手動設定
-            </button>
-            
-            {showManualLocationSelect && (
-              <select
-                value={currentLocation}
-                onChange={(e) => {
-                  setCurrentLocation(e.target.value as LocationContext);
-                  setShowManualLocationSelect(false);
-                }}
-                style={{ marginLeft: '10px', padding: '5px' }}
-              >
-                <option value="外出先">外出先</option>
-                <option value="学校">学校</option>
-                <option value="職場">職場</option>
-                <option value="自宅">自宅</option>
-              </select>
-            )}
-            
-            <button
-              onClick={() => {
-                if (!isPersonalMode) {
-                  authenticate('personal');
-                } else {
-                  setIsPersonalMode(false);
-                }
-              }}
-              style={{
-                padding: '5px 10px',
-                backgroundColor: isPersonalMode ? '#ff6b6b' : '#4ecdc4',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-            >
-              {isPersonalMode ? '個人モード解除' : '個人モード'}
+      {/* ハンバーガーメニュー - 左上に配置 */}
+      <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="メニュー">
+        <span className="menu-icon"></span>
+        <span className="menu-icon"></span>
+        <span className="menu-icon"></span>
+      </button>
+
+      {/* サイドメニュー */}
+      <div className={`side-menu ${menuOpen ? 'open' : ''}`}>
+        <div className="menu-header">
+          <button className="close-menu" onClick={() => setMenuOpen(false)}>×</button>
+        </div>
+        <nav className="menu-nav">
+          <button 
+            className={currentPage === 'main' ? 'active' : ''} 
+            onClick={() => {setCurrentPage('main'); setMenuOpen(false)}}
+          >
+            タスク一覧
+          </button>
+          <button 
+            className={currentPage === 'add-task' ? 'active' : ''} 
+            onClick={() => {setCurrentPage('add-task'); setMenuOpen(false)}}
+          >
+            タスク追加
+          </button>
+          <button 
+            className={currentPage === 'locations' ? 'active' : ''} 
+            onClick={() => {setCurrentPage('locations'); setMenuOpen(false)}}
+          >
+            位置情報管理
+          </button>
+          <button 
+            className={currentPage === 'account' ? 'active' : ''} 
+            onClick={() => {setCurrentPage('account'); setMenuOpen(false)}}
+          >
+            アカウント
+          </button>
+          <button 
+            className={currentPage === 'settings' ? 'active' : ''} 
+            onClick={() => {setCurrentPage('settings'); setMenuOpen(false)}}
+          >
+            設定
+          </button>
+        </nav>
+      </div>
+
+      {/* メインコンテンツ */}
+      <div className="main-content">
+        <header className="App-header">
+          <h1>Secure TODO PWA</h1>
+          
+          {/* ステータスバー */}
+          <div className="status-bar">
+            <span className="location-status">📍 {getLocationStatusText()}</span>
+            {privateMode && <span className="private-mode-badge">🔓 プライベートモード</span>}
+            <button onClick={() => setDebugMode(!debugMode)} className="debug-toggle">
+              GPS表示
             </button>
           </div>
 
-          {/* GPS状態表示 */}
-          {useAutoLocation && (
-            <div style={{ fontSize: '12px', marginTop: '10px' }}>
-              <div>
-                GPS状態: {gpsStatus.isAvailable ? '🟢 取得中' : '🔴 停止'} | 
-                精度: {gpsStatus.accuracy ? `±${Math.round(gpsStatus.accuracy)}m` : '---'} | 
-                更新: {gpsStatus.lastUpdate ? gpsStatus.lastUpdate.toLocaleTimeString() : '---'}
-              </div>
-              {gpsStatus.error && (
-                <div style={{ color: '#ff6b6b', marginTop: '5px' }}>
-                  ⚠️ {gpsStatus.error}
+          {/* GPS情報 */}
+          {debugMode && currentLocation && (
+            <div className="debug-info">
+              <h4>GPS情報</h4>
+              <p>緯度: {currentLocation.lat.toFixed(6)}</p>
+              <p>経度: {currentLocation.lon.toFixed(6)}</p>
+              <p>精度: {gpsAccuracy ? `${gpsAccuracy.toFixed(1)}m` : '不明'}</p>
+              <p>ステータス: {locationStatus}</p>
+            </div>
+          )}
+
+          {/* プライベートモードボタン */}
+          <button onClick={togglePrivateMode} className="private-mode-btn">
+            {privateMode ? '🔓 プライベートモード解除' : '🔒 プライベートモード'}
+          </button>
+
+          {/* ページコンテンツ */}
+          {currentPage === 'main' && (
+            <div className="page-content">
+              {/* 非表示タスク数 */}
+              {hasHiddenTasks && !privateMode && (
+                <div className="hidden-tasks-info">
+                  <h4>表示されていないタスク:</h4>
+                  {Object.entries(hiddenCounts).map(([cat, count]) => 
+                    count > 0 && (
+                      <span key={cat} className="hidden-count">
+                        {cat}: {count}件
+                      </span>
+                    )
+                  )}
                 </div>
               )}
-              
-              {/* 場所の登録ボタン */}
-              {gpsStatus.currentCoords && (
-                <button
-                  onClick={() => authenticate('saveLocation')}
-                  style={{
-                    marginTop: '10px',
-                    padding: '5px 10px',
-                    backgroundColor: '#45b7d1',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '12px'
-                  }}
-                >
-                  📍 現在地を場所として登録
-                </button>
-              )}
-            </div>
-          )}
 
-          {/* 登録済み場所の表示 */}
-          {savedLocations.length > 0 && (
-            <div style={{ fontSize: '12px', marginTop: '10px' }}>
-              登録済み: {savedLocations.map(loc => loc.context).join(', ')}
-            </div>
-          )}
-        </div>
-
-        {/* デバッグモード切り替え */}
-        <div style={{ marginBottom: '10px' }}>
-          <label style={{ fontSize: '12px' }}>
-            <input
-              type="checkbox"
-              checked={debugMode}
-              onChange={(e) => setDebugMode(e.target.checked)}
-              style={{ marginRight: '5px' }}
-            />
-            デバッグ表示
-          </label>
-        </div>
-
-        {/* デバッグ情報 */}
-        {debugMode && gpsStatus.currentCoords && (
-          <div style={{ 
-            fontSize: '11px', 
-            backgroundColor: '#1a1f27', 
-            padding: '10px', 
-            borderRadius: '4px',
-            marginBottom: '10px',
-            fontFamily: 'monospace'
-          }}>
-            <div>緯度: {gpsStatus.currentCoords.latitude.toFixed(6)}</div>
-            <div>経度: {gpsStatus.currentCoords.longitude.toFixed(6)}</div>
-            <div>精度: {gpsStatus.currentCoords.accuracy.toFixed(1)}m</div>
-            <div>高度: {gpsStatus.currentCoords.altitude ? `${gpsStatus.currentCoords.altitude}m` : 'N/A'}</div>
-            <div>速度: {gpsStatus.currentCoords.speed ? `${gpsStatus.currentCoords.speed}m/s` : 'N/A'}</div>
-            {savedLocations.map((loc, idx) => (
-              <div key={idx} style={{ marginTop: '5px' }}>
-                {loc.context}までの距離: {
-                  gpsStatus.currentCoords ? calculateDistance(
-                    gpsStatus.currentCoords.latitude,
-                    gpsStatus.currentCoords.longitude,
-                    loc.latitude,
-                    loc.longitude
-                  ).toFixed(0) : '---'
-                }m (範囲: {loc.radius}m)
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* プライバシーレベル表示 */}
-        <div style={{ marginBottom: '20px', fontSize: '14px' }}>
-          現在地: {currentLocation} | プライバシーレベル: {getPrivacyLevel()} 
-          {isPersonalMode && ' 🔓'}
-        </div>
-
-        {/* フィルター */}
-        <div style={{ margin: '20px 0' }}>
-          <select
-            value={filterCategory}
-            onChange={(e) => setFilterCategory(e.target.value as any)}
-            style={{
-              padding: '10px',
-              fontSize: '16px',
-              borderRadius: '4px'
-            }}
-          >
-            <option value="すべて">すべて表示</option>
-            <option value="学校">学校のみ</option>
-            <option value="仕事">仕事のみ</option>
-            <option value="個人">個人のみ</option>
-            <option value="その他">その他のみ</option>
-          </select>
-        </div>
-
-        {/* タスク入力エリア */}
-        <div style={{ margin: '20px 0', maxWidth: '600px' }}>
-          <div style={{ display: 'flex', marginBottom: '10px' }}>
-            <select
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value as Todo['category'])}
-              style={{
-                padding: '10px',
-                fontSize: '16px',
-                borderRadius: '4px',
-                marginRight: '10px',
-                backgroundColor: getCategoryColor(selectedCategory),
-                color: 'white',
-                border: 'none'
-              }}
-            >
-              <option value="学校">学校</option>
-              <option value="仕事">仕事</option>
-              <option value="個人">個人</option>
-              <option value="その他">その他</option>
-            </select>
-            
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && addTodo()}
-              placeholder="タスク名"
-              style={{
-                padding: '10px',
-                fontSize: '16px',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                flex: 1
-              }}
-            />
-          </div>
-          
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="詳細（任意）"
-            style={{
-              width: '100%',
-              padding: '10px',
-              fontSize: '14px',
-              borderRadius: '4px',
-              border: '1px solid #ccc',
-              marginBottom: '10px',
-              minHeight: '60px',
-              resize: 'vertical'
-            }}
-          />
-          
-          <button
-            onClick={addTodo}
-            style={{
-              padding: '10px 20px',
-              fontSize: '16px',
-              borderRadius: '4px',
-              border: 'none',
-              backgroundColor: '#61dafb',
-              color: '#282c34',
-              cursor: 'pointer',
-              width: '100%'
-            }}
-          >
-            追加
-          </button>
-        </div>
-
-        {/* タスクリスト表示 */}
-        <div style={{ minHeight: '300px', width: '100%', maxWidth: '600px' }}>
-          {getPrivacyLevel() === 'minimal' ? (
-            <div style={{ padding: '20px', backgroundColor: '#3a3f47', borderRadius: '8px' }}>
-              <h3>タスク概要</h3>
-              {Object.entries(getCategoryCounts()).map(([category, count]) => (
-                count > 0 && (
-                  <div key={category} style={{ margin: '10px 0' }}>
-                    <span style={{
-                      padding: '4px 8px',
-                      borderRadius: '4px',
-                      backgroundColor: getCategoryColor(category as Todo['category']),
-                      color: 'white',
-                      marginRight: '10px'
-                    }}>
-                      {category}
-                    </span>
-                    {count}件
-                  </div>
-                )
-              ))}
-            </div>
-          ) : (
-            <ul style={{ listStyle: 'none', padding: 0 }}>
-              {filteredTodos.map(todo => {
-                const shouldShowDetails = 
-                  getPrivacyLevel() === 'full' || 
-                  (getPrivacyLevel() === 'moderate' && 
-                    ((currentLocation === '学校' && todo.category === '学校') ||
-                     (currentLocation === '職場' && todo.category === '仕事')));
-
-                return (
-                  <li key={todo.id} style={{
-                    margin: '10px 0',
-                    padding: '10px',
-                    backgroundColor: '#3a3f47',
-                    borderRadius: '4px',
-                    borderLeft: `5px solid ${getCategoryColor(todo.category)}`
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center' }}>
-                      <input
-                        type="checkbox"
-                        checked={todo.completed}
-                        onChange={() => toggleTodo(todo.id)}
-                        style={{ marginRight: '10px' }}
-                      />
-                      
-                      <span style={{
-                        padding: '2px 8px',
-                        borderRadius: '4px',
-                        backgroundColor: getCategoryColor(todo.category),
-                        color: 'white',
-                        fontSize: '12px',
-                        marginRight: '10px'
-                      }}>
-                        {todo.category}
-                      </span>
-                      
-                      <div style={{ 
-                        flex: 1,
-                        textDecoration: todo.completed ? 'line-through' : 'none',
-                        opacity: todo.completed ? 0.6 : 1
-                      }}>
-                        {shouldShowDetails ? todo.text : `${todo.category}のタスク`}
-                      </div>
-
-                      {/* 詳細表示ボタン */}
-                      {shouldShowDetails && todo.description && (
-                        <button
-                          onClick={() => toggleExpanded(todo.id)}
-                          style={{
-                            padding: '5px 10px',
-                            marginRight: '10px',
-                            backgroundColor: '#6c757d',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '12px'
-                          }}
+              {/* タスク一覧 */}
+              <div className="todo-list">
+                {todos.filter(isTaskVisible).map(todo => {
+                  const isEditing = editingTodo === todo.id;
+                  
+                  if (isEditing) {
+                    return (
+                      <div key={todo.id} className="todo-item todo-editing">
+                        <input
+                          type="text"
+                          value={editTitle}
+                          onChange={(e) => setEditTitle(e.target.value)}
+                          placeholder="タスク名"
+                          className="edit-input"
+                        />
+                        <textarea
+                          value={editDetail}
+                          onChange={(e) => setEditDetail(e.target.value)}
+                          placeholder="詳細"
+                          className="edit-textarea"
+                          rows={2}
+                        />
+                        <select 
+                          value={editCategory} 
+                          onChange={(e) => setEditCategory(e.target.value as Todo['category'])}
+                          className="edit-select"
                         >
-                          {expandedTodos.has(todo.id) ? '詳細を隠す' : '詳細'}
-                        </button>
-                      )}
-                      
-                      <button
-                        onClick={() => deleteTodo(todo.id)}
-                        style={{
-                          padding: '5px 10px',
-                          backgroundColor: '#ff4444',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer'
-                        }}
-                      >
-                        削除
-                      </button>
-                    </div>
-                    
-                    {/* 折りたたみ式の詳細表示 */}
-                    {shouldShowDetails && expandedTodos.has(todo.id) && todo.description && (
-                      <div style={{ 
-                        marginTop: '10px',
-                        padding: '10px',
-                        backgroundColor: '#2a2f37',
-                        borderRadius: '4px',
-                        fontSize: '14px',
-                        whiteSpace: 'pre-wrap',
-                        lineHeight: '1.5'
-                      }}>
-                        {todo.description}
+                          <option value="個人">個人</option>
+                          <option value="学校">学校</option>
+                          <option value="仕事">仕事</option>
+                          <option value="その他">その他</option>
+                        </select>
+                        <button onClick={saveEdit} className="btn-save">保存</button>
+                        <button onClick={() => setEditingTodo(null)} className="btn-cancel">キャンセル</button>
                       </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+                    );
+                  }
+
+                  return (
+                    <div key={todo.id} className={`todo-item category-${todo.category}`}>
+                      <div className="todo-main">
+                        <span className="todo-title">
+                          [{todo.category}] {todo.title}
+                        </span>
+                        <div className="todo-actions">
+                          {todo.detail && (
+                            <button 
+                              onClick={() => toggleDetail(todo.id)} 
+                              className="btn-detail"
+                            >
+                              {todo.showDetail ? '詳細を隠す' : '詳細'}
+                            </button>
+                          )}
+                          <button onClick={() => startEdit(todo)} className="btn-edit">編集</button>
+                          <button onClick={() => deleteTodo(todo.id)} className="btn-delete">削除</button>
+                        </div>
+                      </div>
+                      {todo.showDetail && todo.detail && (
+                        <div className="todo-detail">
+                          {todo.detail}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           )}
-          
-          {/* 統計情報 */}
-          <div style={{ marginTop: '20px', fontSize: '14px', opacity: 0.8 }}>
-            全タスク: {todos.length} | 
-            完了: {todos.filter(t => t.completed).length} | 
-            未完了: {todos.filter(t => !t.completed).length}
-          </div>
-        </div>
 
-        {/* パスワードダイアログ */}
-        {showPasswordDialog && (
-          <div style={{
-            position: 'fixed',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            backgroundColor: '#2a2f37',
-            padding: '20px',
-            borderRadius: '8px',
-            zIndex: 1000,
-            boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
-          }}>
-            <h3>{hasSetPassword ? 'パスワード入力' : 'パスワード設定'}</h3>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && authenticateWithPassword()}
-              placeholder={hasSetPassword ? 'パスワード' : '新しいパスワード'}
-              style={{ 
-                padding: '10px', 
-                fontSize: '16px', 
-                width: '200px',
-                marginBottom: '10px',
-                borderRadius: '4px',
-                border: '1px solid #ccc'
-              }}
-            />
-            <div style={{ marginTop: '10px' }}>
-              <button 
-                onClick={authenticateWithPassword}
-                style={{
-                  padding: '8px 16px',
-                  marginRight: '10px',
-                  backgroundColor: '#4ecdc4',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                OK
-              </button>
-              <button 
-                onClick={() => {
-                  setShowPasswordDialog(false);
-                  setPassword('');
-                }}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#ff4444',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                キャンセル
-              </button>
+          {currentPage === 'add-task' && (
+            <div className="page-content">
+              <h2>タスク追加</h2>
+              <div className="todo-input">
+                <input
+                  type="text"
+                  value={inputTitle}
+                  onChange={(e) => setInputTitle(e.target.value)}
+                  placeholder="タスク名を入力..."
+                />
+                <textarea
+                  value={inputDetail}
+                  onChange={(e) => setInputDetail(e.target.value)}
+                  placeholder="詳細（任意）"
+                  rows={3}
+                />
+                <select value={category} onChange={(e) => setCategory(e.target.value as Todo['category'])}>
+                  <option value="個人">個人</option>
+                  <option value="学校">学校</option>
+                  <option value="仕事">仕事</option>
+                  <option value="その他">その他</option>
+                </select>
+                <button onClick={addTodo} className="btn-add">追加</button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* 場所登録ダイアログ */}
-        {showLocationSaveDialog && (
-          <div style={{
-            position: 'fixed',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            backgroundColor: '#2a2f37',
-            padding: '20px',
-            borderRadius: '8px',
-            zIndex: 1000,
-            boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
-          }}>
-            <h3>現在地を登録</h3>
-            <p style={{ fontSize: '14px' }}>
-              現在地を以下の場所として登録します：
-            </p>
-            <select
-              value={locationToSave}
-              onChange={(e) => setLocationToSave(e.target.value as LocationContext)}
-              style={{ 
-                padding: '10px', 
-                fontSize: '16px', 
-                width: '200px',
-                marginBottom: '10px',
-                borderRadius: '4px'
-              }}
-            >
-              <option value="自宅">自宅（半径150m）</option>
-              <option value="学校">学校（半径200m）</option>
-              <option value="職場">職場（半径200m）</option>
-            </select>
-            <div style={{ marginTop: '10px' }}>
-              <button 
-                onClick={saveCurrentLocation}
-                style={{
-                  padding: '8px 16px',
-                  marginRight: '10px',
-                  backgroundColor: '#45b7d1',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                登録
-              </button>
-              <button 
-                onClick={() => setShowLocationSaveDialog(false)}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#ff4444',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                キャンセル
-              </button>
+          {currentPage === 'locations' && (
+            <div className="page-content">
+              <h2>位置情報管理</h2>
+              
+              {currentLocation && (
+                <div className="location-form">
+                  <h3>現在地を登録</h3>
+                  <input
+                    type="text"
+                    value={newLocationName}
+                    onChange={(e) => setNewLocationName(e.target.value)}
+                    placeholder="場所の名前"
+                  />
+                  <select
+                    value={newLocationType}
+                    onChange={(e) => setNewLocationType(e.target.value as Location['type'])}
+                  >
+                    <option value="home">自宅</option>
+                    <option value="school">学校</option>
+                    <option value="work">仕事場</option>
+                  </select>
+                  <input
+                    type="number"
+                    value={newLocationRadius}
+                    onChange={(e) => setNewLocationRadius(Number(e.target.value))}
+                    placeholder="半径（メートル）"
+                    min="50"
+                    max="500"
+                  />
+                  <button onClick={registerCurrentLocation}>登録（要認証）</button>
+                </div>
+              )}
+
+              <div className="registered-locations">
+                <h3>登録済みの場所</h3>
+                {registeredLocations.map(loc => (
+                  <div key={loc.id} className="location-item">
+                    <span>
+                      {loc.name} ({loc.type === 'home' ? '自宅' : loc.type === 'school' ? '学校' : '仕事場'}) 
+                      - 半径{loc.radius}m
+                    </span>
+                    <button onClick={() => deleteLocation(loc.id)} className="btn-delete">
+                      削除（要認証）
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-      </header>
+          )}
+
+          {currentPage === 'account' && (
+            <div className="page-content">
+              <h2>アカウント</h2>
+              <div className="account-info">
+                <p>将来的にアカウント機能を実装予定</p>
+                <p>ユーザー名: ゲスト</p>
+                <p>メールアドレス: 未設定</p>
+                <p>プラン: フリープラン</p>
+              </div>
+            </div>
+          )}
+
+          {currentPage === 'settings' && (
+            <div className="page-content">
+              <h2>設定</h2>
+              <div className="settings-section">
+                <h3>生体認証</h3>
+                {!biometricEnabled ? (
+                  <button onClick={enableBiometric} className="btn-primary">
+                    生体認証を有効にする
+                  </button>
+                ) : (
+                  <p>✅ 生体認証が有効です</p>
+                )}
+                <p className="note">
+                  注：現在はシミュレーション機能です。
+                  実際の実装にはWebAuthn APIが必要です。
+                </p>
+              </div>
+            </div>
+          )}
+        </header>
+      </div>
+
+      {/* メニューオーバーレイ */}
+      {menuOpen && <div className="menu-overlay" onClick={() => setMenuOpen(false)} />}
     </div>
   );
 }
