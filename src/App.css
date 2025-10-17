@@ -612,3 +612,63 @@ button:hover {
     width: 100%;
   }
 }
+
+/* タスク完了機能のスタイル */
+.todo-checkbox {
+  width: 18px;
+  height: 18px;
+  margin-right: 10px;
+  cursor: pointer;
+  accent-color: #16a34a;
+}
+
+.todo-title.completed {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.todo-item.completed {
+  opacity: 0.8;
+}
+
+/* 完了タスク一括削除ボタン */
+.bulk-delete-container {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #e0e0e0;
+  text-align: center;
+}
+
+.btn-bulk-delete {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-bulk-delete:hover {
+  background: #b91c1c;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(220, 38, 38, 0.2);
+}
+
+/* リセットボタン */
+.btn-reset {
+  margin-top: 10px;
+  background: #ef4444;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-reset:hover {
+  background: #dc2626;
+}

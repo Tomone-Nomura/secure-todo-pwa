@@ -9,6 +9,7 @@ interface Todo {
   category: '個人' | '学校' | '仕事' | 'その他';
   createdAt: string;
   showDetail?: boolean;
+  completed?: boolean;  // 追加
 }
 
 interface Location {
@@ -108,27 +109,112 @@ function App() {
     localStorage.setItem('biometricEnabled', JSON.stringify(biometricEnabled));
   }, [biometricEnabled]);
 
+  // WebAuthn対応チェック
+  const isWebAuthnAvailable = () => {
+    return window.PublicKeyCredential !== undefined;
+  };
+
   // 生体認証の実行
   const performBiometricAuth = async (action: string = 'authenticate'): Promise<boolean> => {
-    if (!('credentials' in navigator)) {
-      alert('このブラウザは生体認証に対応していません');
-      return false;
-    }
-
     setAuthenticating(true);
+    
     try {
-      // Web Authentication APIのシミュレーション
-      // 実際の実装では、適切なWebAuthn実装が必要
-      const result = window.confirm(`${action}のために生体認証を実行しますか？\n（これはシミュレーションです）`);
-      
-      if (result) {
-        // 実際の実装では、ここでWebAuthn APIを使用
-        console.log('生体認証成功');
-        return true;
+      // WebAuthnが利用可能かチェック
+      if (isWebAuthnAvailable()) {
+        const credentialId = localStorage.getItem('webauthn_credential_id');
+        
+        if (action === '生体認証を設定' && !credentialId) {
+          // 新規登録
+          const challenge = new Uint8Array(32);
+          crypto.getRandomValues(challenge);
+          
+          const createOptions: PublicKeyCredentialCreationOptions = {
+            challenge,
+            rp: {
+              name: "Secure TODO PWA",
+              id: window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname,
+            },
+            user: {
+              id: new TextEncoder().encode('user_' + Date.now()),
+              name: 'user@securetodo.app',
+              displayName: 'ユーザー',
+            },
+            pubKeyCredParams: [
+              { alg: -7, type: "public-key" },  // ES256
+              { alg: -257, type: "public-key" }, // RS256
+            ],
+            authenticatorSelection: {
+              authenticatorAttachment: "platform",
+              userVerification: "required"
+            },
+            timeout: 60000,
+            attestation: "none"
+          };
+          
+          try {
+            const credential = await navigator.credentials.create({
+              publicKey: createOptions
+            }) as PublicKeyCredential;
+            
+            if (credential) {
+              // 認証情報のIDを保存
+              localStorage.setItem('webauthn_credential_id', credential.id);
+              const rawIdArray = Array.from(new Uint8Array(credential.rawId));
+              localStorage.setItem('webauthn_raw_id', btoa(String.fromCharCode(...rawIdArray)));
+              console.log('WebAuthn登録成功');
+              return true;
+            }
+          } catch (e) {
+            console.error('WebAuthn登録エラー:', e);
+            throw e;
+          }
+        } else if (credentialId) {
+          // 認証実行
+          const challenge = new Uint8Array(32);
+          crypto.getRandomValues(challenge);
+          
+          const rawId = localStorage.getItem('webauthn_raw_id');
+          if (!rawId) {
+            throw new Error('認証情報が見つかりません');
+          }
+          
+          const getOptions: PublicKeyCredentialRequestOptions = {
+            challenge,
+            allowCredentials: [{
+              id: Uint8Array.from(atob(rawId), c => c.charCodeAt(0)),
+              type: 'public-key',
+              transports: ['internal'] as AuthenticatorTransport[]
+            }],
+            userVerification: "required",
+            timeout: 60000,
+          };
+          
+          try {
+            const assertion = await navigator.credentials.get({
+              publicKey: getOptions
+            }) as PublicKeyCredential;
+            
+            if (assertion) {
+              console.log('WebAuthn認証成功');
+              return true;
+            }
+          } catch (e) {
+            console.error('WebAuthn認証エラー:', e);
+            throw e;
+          }
+        }
       }
-      return false;
+      
+      // WebAuthnが使えない場合はフォールバック
+      const result = window.confirm(`${action}のために認証を実行しますか？\n（WebAuthnが利用できないため、簡易認証を使用）`);
+      return result;
+      
     } catch (error) {
-      console.error('生体認証エラー:', error);
+      console.error('認証エラー:', error);
+      // エラー時はフォールバック認証
+      if (window.confirm('生体認証に失敗しました。簡易認証を使用しますか？')) {
+        return window.confirm('認証を続行しますか？');
+      }
       return false;
     } finally {
       setAuthenticating(false);
@@ -161,6 +247,15 @@ function App() {
     }
   };
 
+  // タスク完了の切り替え（追加）
+  const toggleComplete = (id: number) => {
+    setTodos(todos.map(todo => 
+      todo.id === id 
+        ? { ...todo, completed: !todo.completed }
+        : todo
+    ));
+  };
+
   // TODO追加
   const addTodo = () => {
     if (inputTitle.trim()) {
@@ -170,7 +265,8 @@ function App() {
         detail: inputDetail,
         category,
         createdAt: new Date().toISOString(),
-        showDetail: false
+        showDetail: false,
+        completed: false  // 追加
       };
       setTodos([...todos, newTodo]);
       setInputTitle('');
@@ -347,6 +443,28 @@ function App() {
   const hiddenCounts = getHiddenTasksCount();
   const hasHiddenTasks = Object.values(hiddenCounts).some(count => count > 0);
 
+  // タスクをソート（完了タスクを下に）
+  const sortedTodos = todos.filter(isTaskVisible).sort((a, b) => {
+    if (a.completed !== b.completed) {
+      return a.completed ? 1 : -1;
+    }
+    return 0;
+  });
+
+  // 完了タスクの一括削除
+  const deleteAllCompleted = () => {
+    const completedCount = todos.filter(todo => todo.completed).length;
+    if (completedCount === 0) {
+      alert('完了したタスクがありません');
+      return;
+    }
+    
+    if (window.confirm(`完了した${completedCount}件のタスクを削除しますか？`)) {
+      setTodos(todos.filter(todo => !todo.completed));
+      alert(`${completedCount}件のタスクを削除しました`);
+    }
+  };
+
   return (
     <div className="App">
       {/* ハンバーガーメニュー - 左上に配置 */}
@@ -444,7 +562,7 @@ function App() {
 
               {/* タスク一覧 */}
               <div className="todo-list">
-                {todos.filter(isTaskVisible).map(todo => {
+                {sortedTodos.map(todo => {
                   const isEditing = editingTodo === todo.id;
                   
                   if (isEditing) {
@@ -481,9 +599,15 @@ function App() {
                   }
 
                   return (
-                    <div key={todo.id} className={`todo-item category-${todo.category}`}>
+                    <div key={todo.id} className={`todo-item category-${todo.category} ${todo.completed ? 'completed' : ''}`}>
                       <div className="todo-main">
-                        <span className="todo-title">
+                        <input
+                          type="checkbox"
+                          checked={todo.completed || false}
+                          onChange={() => toggleComplete(todo.id)}
+                          className="todo-checkbox"
+                        />
+                        <span className={`todo-title ${todo.completed ? 'completed' : ''}`}>
                           [{todo.category}] {todo.title}
                         </span>
                         <div className="todo-actions">
@@ -508,6 +632,15 @@ function App() {
                   );
                 })}
               </div>
+
+              {/* 完了タスク一括削除ボタン */}
+              {todos.some(todo => todo.completed) && (
+                <div className="bulk-delete-container">
+                  <button onClick={deleteAllCompleted} className="btn-bulk-delete">
+                    🗑️ 完了タスクを一括削除
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -613,9 +746,25 @@ function App() {
                   <p>✅ 生体認証が有効です</p>
                 )}
                 <p className="note">
-                  注：現在はシミュレーション機能です。
-                  実際の実装にはWebAuthn APIが必要です。
+                  {isWebAuthnAvailable() 
+                    ? '✅ WebAuthn（生体認証）が利用可能です' 
+                    : '⚠️ このブラウザは生体認証に対応していません（簡易認証を使用）'}
                 </p>
+                {biometricEnabled && localStorage.getItem('webauthn_credential_id') && (
+                  <button 
+                    onClick={() => {
+                      if (window.confirm('生体認証情報をリセットしますか？')) {
+                        localStorage.removeItem('webauthn_credential_id');
+                        localStorage.removeItem('webauthn_raw_id');
+                        setBiometricEnabled(false);
+                        alert('生体認証情報をリセットしました');
+                      }
+                    }} 
+                    className="btn-reset"
+                  >
+                    認証情報をリセット
+                  </button>
+                )}
               </div>
             </div>
           )}
